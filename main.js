@@ -174,19 +174,42 @@ async function labelElements(page, adapterConfig) {
 
         await wait(waitTime);
 
+        // Gesamthöhe der Seite ermitteln
+        const bodyHandle = await page.$('body');
+        const { scrollHeight } = await bodyHandle.evaluate(body => ({ scrollHeight: body.scrollHeight }));
+        await bodyHandle.dispose();
+
+        const viewportHeight = res.hoehe;
+        let scrollSteps = Math.ceil(scrollHeight / viewportHeight);
+
+
         if (adapterConfig) {
             // Tabs innerhalb von #app-paper finden
             const tabs = await page.$$(`#app-paper .MuiTab-root`); // Passen Sie den Selektor an Ihre Seite an
-            console.log(`Anzahl Tabs: ${tabs.length}`);
+            // console.log(`Anzahl Tabs: ${tabs.length}`);
             if (tabs.length > 0) {
                 // Für jeden Tab einen Screenshot erstellen
                 for (let i = 0; i < tabs.length; i++) {
+                    // Schwebenden Button ausblenden
+                    await page.evaluate(() => {
+                        const floatingButton = document.querySelectorAll('.MuiFab-root'); // Passen Sie den Selektor an
+                        if (floatingButton) {
+                            for (let fb of floatingButton) {
+                                fb.style.display = 'none';
+                            }
+
+                        }
+                    });
                     // Tab anklicken
                     await tabs[i].click();
 
-                    // Warten, bis der Inhalt des Tabs geladen ist
-                    // Hier könnten Sie auf ein spezifisches Element innerhalb des Tabs warten
-                    // await page.waitForSelector('#specific-element', {timeout: 10000});
+                    // Schwebenden Button wieder einblenden
+                    await page.evaluate(() => {
+                        const floatingButton = document.querySelectorAll('.MuiFab-root'); // Passen Sie den Selektor an
+                        for (let fb of floatingButton) {
+                            fb.style.display = '';
+                        }
+                    });
 
                     // Alternativ eine feste Wartezeit verwenden
                     await wait(1000);
@@ -195,10 +218,74 @@ async function labelElements(page, adapterConfig) {
                         await labelElements(page, adapterConfig);
                     }
 
-                    const fileName = `${res.name}_${dateFormatted}_tab${i + 1}.png`;
-                    const fullPath = path.join(outputPath, fileName);
-                    await page.screenshot({path: fullPath});
-                    console.log(`Screenshot erstellt: ${fullPath}`);
+                    // Scrollbares Div finden
+                    const scrollableDivSelector = await page.evaluate(() => {
+                        // Alle Divs auf der Seite finden
+                        const divs = Array.from(document.querySelectorAll('div'));
+                        // Div finden, das scrollable ist
+                        const scrollableDiv = divs.find(div => {
+                            const style = window.getComputedStyle(div);
+                            const overflowY = style.overflowY;
+                            const scrollHeight = div.scrollHeight;
+                            const clientHeight = div.clientHeight;
+                            return (
+                                (overflowY === 'auto' || overflowY === 'scroll') &&
+                                scrollHeight > clientHeight
+                            );
+                        });
+                        if (scrollableDiv) {
+                            // Erstellen Sie einen eindeutigen Selektor
+                            scrollableDiv.setAttribute('data-scrollable-div', 'true');
+                            return '[data-scrollable-div="true"]';
+                        }
+                        return null;
+                    });
+
+                    if (!scrollableDivSelector) {
+                        console.error('Kein scrollbares Div gefunden.');
+                        continue;
+                    }
+
+                    // Gesamthöhe der Seite ermitteln
+                    const totalHeight = await page.evaluate(() => {
+                        return document.documentElement.scrollHeight;
+                    });
+
+                    let viewportHeight = res.hoehe;
+                    let scrollY = 0;
+                    let part = 1;
+
+
+                    while (scrollY < totalHeight) {
+                        await page.evaluate((selector, _scrollY) => {
+                            const div = document.querySelector(selector);
+                            div.scrollTo(0, _scrollY);
+                        }, scrollableDivSelector, scrollY);
+
+                        await wait(500);
+
+                        const fileName = `${res.name}_${dateFormatted}_tab${i + 1}_part${part}.png`;
+                        const fullPath = path.join(outputPath, fileName);
+
+                        try {
+                            await page.screenshot({ path: fullPath });
+                            console.log(`Screenshot erstellt: ${fullPath}`);
+                        } catch (error) {
+                            console.error(`Fehler beim Erstellen des Screenshots: ${error}`);
+                        }
+
+                        scrollY += viewportHeight;
+                        part++;
+                    }
+
+                    // Zurück zum Anfang des Divs scrollen
+                    await page.evaluate((selector) => {
+                        const div = document.querySelector(selector);
+                        div.scrollTo(0, 0);
+                        // Attribut entfernen
+                        div.removeAttribute('data-scrollable-div');
+                    }, scrollableDivSelector);
+
                 }
             } else {
                 console.log('Keine Tabs innerhalb von #app-paper gefunden.');
@@ -207,10 +294,50 @@ async function labelElements(page, adapterConfig) {
                     await labelElements(page, adapterConfig);
                 }
 
-                const fileName = `${res.name}_${dateFormatted}.png`;
-                const fullPath = path.join(outputPath, fileName);
-                await page.screenshot({path: fullPath});
-                console.log(`Screenshot erstellt: ${fullPath}`);
+                // Gesamthöhe der Seite ermitteln
+                const totalHeight = await page.evaluate(() => {
+                    return document.body.scrollHeight;
+                });
+
+                let viewportHeight = res.hoehe;
+                let scrollY = 0;
+                let part = 1;
+
+                while (scrollY < totalHeight) {
+                    await page.evaluate((_scrollY) => {
+                        window.scrollTo(0, _scrollY);
+                    }, scrollY);
+
+                    await wait(500);
+
+                    const fileName = `${res.name}_${dateFormatted}_part${part}.png`;
+                    const fullPath = path.join(outputPath, fileName);
+
+                    // Berechnen der tatsächlichen Höhe für den Screenshot
+                    let clipHeight = viewportHeight;
+                    if (scrollY + viewportHeight > totalHeight) {
+                        clipHeight = totalHeight - scrollY;
+                    }
+
+                    await page.screenshot({
+                        path: fullPath,
+                        clip: {
+                            x: 0,
+                            y: 0,
+                            width: res.breite,
+                            height: clipHeight,
+                        },
+                    });
+                    console.log(`Screenshot erstellt: ${fullPath}`);
+
+                    scrollY += viewportHeight;
+                    part++;
+                }
+
+                // Zurück zum Anfang der Seite scrollen
+                await page.evaluate(() => {
+                    window.scrollTo(0, 0);
+                });
             }
         } else {
             // Ohne adapterConfig wie gewohnt fortfahren
@@ -220,11 +347,51 @@ async function labelElements(page, adapterConfig) {
                 await labelElements(page, adapterConfig);
             }
 
-            const fileName = `${res.name}_${dateFormatted}.png`;
-            const fullPath = path.join(outputPath, fileName);
-            await page.screenshot({path: fullPath});
-            console.log(`Screenshot erstellt: ${fullPath}`);
-        }
+            // Gesamthöhe der Seite ermitteln
+            const totalHeight = await page.evaluate(() => {
+                return document.body.scrollHeight;
+            });
+
+            let viewportHeight = res.hoehe;
+            let scrollY = 0;
+            let part = 1;
+
+            while (scrollY < totalHeight) {
+                await page.evaluate((_scrollY) => {
+                    window.scrollTo(0, _scrollY);
+                }, scrollY);
+
+                await wait(500);
+
+                const fileName = `${res.name}_${dateFormatted}_part${part}.png`;
+                const fullPath = path.join(outputPath, fileName);
+
+                // Berechnen der tatsächlichen Höhe für den Screenshot
+                let clipHeight = viewportHeight;
+                if (scrollY + viewportHeight > totalHeight) {
+                    clipHeight = totalHeight - scrollY;
+                }
+
+                await page.screenshot({
+                    path: fullPath,
+                    clip: {
+                        x: 0,
+                        y: 0,
+                        width: res.breite,
+                        height: clipHeight
+                    }
+                });
+                console.log(`Screenshot erstellt: ${fullPath}`);
+
+                scrollY += viewportHeight;
+                part++;
+            }
+
+                // Zurück zum Anfang der Seite scrollen
+                await page.evaluate(() => {
+                    window.scrollTo(0, 0);
+                });
+            }
     }
 
     await browser.close();
